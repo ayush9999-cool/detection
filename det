@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Smart Camera + Text Detector</title>
+  <style>
+    body { background: black; color: lime; text-align: center; font-family: Arial; }
+    video { border: 2px solid lime; width: 90%; max-width: 600px; }
+    #log { font-size: 18px; margin-top: 10px; white-space: pre-line; }
+  </style>
+</head>
+<body>
+  <h2>📷 Smart Object + Text Detector (No Server)</h2>
+  <video id="video" autoplay playsinline muted></video>
+  <div id="log">Loading model...</div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.2.0"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4.0.2/dist/tesseract.min.js"></script>
+
+  <script>
+    const video = document.getElementById('video');
+    const log = document.getElementById('log');
+    let model, lastSpoken = "", lastText = "", lastTime = 0, lastTextTime = 0;
+    const cooldown = 4000;
+
+    async function setupCamera() {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { exact: "environment" } },
+        audio: false
+      });
+      video.srcObject = stream;
+      return new Promise(resolve => video.onloadedmetadata = resolve);
+    }
+
+    function speak(text) {
+      if (speechSynthesis.speaking) return;
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.rate = 0.9;
+      speechSynthesis.speak(utter);
+    }
+
+    function estimateDistance(bboxHeight, frameHeight) {
+      const realHeight = 150;
+      const focal = 500;
+      const distance = (realHeight * focal) / (bboxHeight * frameHeight);
+      return Math.min(Math.max(distance / 100, 0.3), 4);
+    }
+
+    function metersToSteps(m) {
+      return Math.round(m / 0.75);
+    }
+
+    async function detect() {
+      if (!model) return;
+      const predictions = await model.detect(video);
+      const now = Date.now();
+
+      const filtered = predictions
+        .filter(p => p.class !== "person" && p.score > 0.5)
+        .sort((a, b) => (b.bbox[2] * b.bbox[3]) - (a.bbox[2] * a.bbox[3]));
+
+      if (filtered.length > 0) {
+        const obj = filtered[0];
+        const dist = estimateDistance(obj.bbox[3], video.videoHeight);
+        const steps = metersToSteps(dist);
+        if ((obj.class !== lastSpoken || now - lastTime > cooldown) && dist <= 4) {
+          const msg = `${obj.class}, ${dist.toFixed(1)} meters, ${steps} steps`;
+          log.textContent = `🟢 Object: ${msg}`;
+          speak(msg);
+          lastSpoken = obj.class;
+          lastTime = now;
+        }
+      }
+
+      if (now - lastTextTime > 4000) {
+        lastTextTime = now;
+        const scale = 2.5;
+        const canvas = document.createElement('canvas');
+        const w = video.videoWidth * 0.7;
+        const h = video.videoHeight * 0.5;
+        const x = (video.videoWidth - w) / 2;
+        const y = (video.videoHeight - h) / 2;
+        canvas.width = w * scale;
+        canvas.height = h * scale;
+        const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(video, x, y, w, h, 0, 0, w * scale, h * scale);
+
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        for (let i = 0; i < imageData.data.length; i += 4) {
+          const avg = (imageData.data[i] + imageData.data[i + 1] + imageData.data[i + 2]) / 3;
+          const contrast = avg > 128 ? 255 : 0;
+          imageData.data[i] = imageData.data[i + 1] = imageData.data[i + 2] = contrast;
+        }
+        ctx.putImageData(imageData, 0, 0);
+
+        Tesseract.recognize(canvas, 'eng').then(({ data: { text } }) => {
+          const cleanText = text.trim().replace(/\n+/g, ' ');
+          if (cleanText && cleanText !== lastText && cleanText.length > 2) {
+            speak(`Text: ${cleanText}`);
+            log.textContent += `\n📖 Text: ${cleanText}`;
+            lastText = cleanText;
+          }
+        });
+      }
+
+      requestAnimationFrame(detect);
+    }
+
+    (async () => {
+      try {
+        await setupCamera();
+        model = await cocoSsd.load();
+        log.textContent = "✅ Ready. Point at objects or text.";
+        detect();
+      } catch (err) {
+        log.textContent = "❌ Camera access failed: " + err;
+      }
+    })();
+  </script>
+</body>
+</html>
